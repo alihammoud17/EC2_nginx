@@ -1,0 +1,38 @@
+# .gitignore
+
+# Terraform files
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+.terraform/
+.terraform.lock.hcl
+crash.log
+
+# Ansible files
+inventory
+*.retry
+.ansible/
+
+# SSH keys
+id_rsa*
+*.pem
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
