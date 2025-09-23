@@ -1,0 +1,7 @@
+# requirements.txt
+# Python packages required for Ansible modules
+
+ansible>=4.0.0
+boto3>=1.20.0
+botocore>=1.23.0
+requests>=2.25.0
