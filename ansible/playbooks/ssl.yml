@@ -1,0 +1,169 @@
+# ansible/playbooks/ssl.yml - SSL certificate management playbook
+---
+- name: SSL/TLS certificate management
+  hosts: webservers
+  become: true
+  vars:
+    ssl_cert_path: "/etc/ssl/certs"
+    ssl_key_path: "/etc/ssl/private"
+    ssl_domain: "{{ ansible_default_ipv4.address }}"
+    ssl_country: "US"
+    ssl_state: "State"
+    ssl_city: "City"
+    ssl_org: "{{ project_name | title }} Organization"
+
+  tasks:
+    - name: Install SSL/TLS related packages
+      apt:
+        name:
+          - openssl
+          - ca-certificates
+          - certbot
+          - python3-certbot-nginx
+        state: present
+
+    - name: Create SSL directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - "{{ ssl_cert_path }}"
+        - "{{ ssl_key_path }}"
+
+    - name: Generate self-signed SSL certificate for development
+      block:
+        - name: Generate private key
+          openssl_privatekey:
+            path: "{{ ssl_key_path }}/{{ app_name }}.key"
+            size: 2048
+            type: RSA
+            owner: root
+            group: root
+            mode: '0600'
+
+        - name: Generate certificate signing request
+          openssl_csr:
+            path: "/tmp/{{ app_name }}.csr"
+            privatekey_path: "{{ ssl_key_path }}/{{ app_name }}.key"
+            country_name: "{{ ssl_country }}"
+            state_or_province_name: "{{ ssl_state }}"
+            locality_name: "{{ ssl_city }}"
+            organization_name: "{{ ssl_org }}"
+            common_name: "{{ ssl_domain }}"
+            subject_alt_name:
+              - "DNS:{{ ssl_domain }}"
+              - "DNS:www.{{ ssl_domain }}"
+              - "IP:{{ ansible_default_ipv4.address }}"
+
+        - name: Generate self-signed certificate
+          openssl_certificate:
+            path: "{{ ssl_cert_path }}/{{ app_name }}.crt"
+            privatekey_path: "{{ ssl_key_path }}/{{ app_name }}.key"
+            csr_path: "/tmp/{{ app_name }}.csr"
+            provider: selfsigned
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Remove CSR file
+          file:
+            path: "/tmp/{{ app_name }}.csr"
+            state: absent
+
+      when: environment != "prod"
+
+    - name: Setup Let's Encrypt SSL certificates for production
+      block:
+        - name: Stop nginx for standalone certificate generation
+          systemd:
+            name: nginx
+            state: stopped
+
+        - name: Generate Let's Encrypt certificate
+          shell: |
+            certbot certonly --standalone \
+              --non-interactive \
+              --agree-tos \
+              --email admin@{{ ssl_domain }} \
+              --domains {{ ssl_domain }}
+          register: letsencrypt_result
+          failed_when: false
+
+        - name: Copy Let's Encrypt certificates to standard location
+          copy:
+            src: "{{ item.src }}"
+            dest: "{{ item.dest }}"
+            remote_src: yes
+            owner: root
+            group: root
+            mode: "{{ item.mode }}"
+          loop:
+            - { src: "/etc/letsencrypt/live/{{ ssl_domain }}/fullchain.pem", dest: "{{ ssl_cert_path }}/{{ app_name }}.crt", mode: "0644" }
+            - { src: "/etc/letsencrypt/live/{{ ssl_domain }}/privkey.pem", dest: "{{ ssl_key_path }}/{{ app_name }}.key", mode: "0600" }
+          when: letsencrypt_result.rc == 0
+
+        - name: Start nginx
+          systemd:
+            name: nginx
+            state: started
+
+        - name: Setup automatic certificate renewal
+          cron:
+            name: "Renew Let's Encrypt certificates"
+            minute: "0"
+            hour: "2"
+            day: "1"
+            job: "certbot renew --quiet --post-hook 'systemctl reload nginx'"
+            user: root
+          when: letsencrypt_result.rc == 0
+
+      when: environment == "prod"
+
+    - name: Update Nginx configuration for SSL
+      template:
+        src: nginx-ssl.conf.j2
+        dest: "/etc/nginx/sites-available/{{ app_name }}-ssl"
+        owner: root
+        group: root
+        mode: '0644'
+        backup: yes
+
+    - name: Enable SSL site
+      file:
+        src: "/etc/nginx/sites-available/{{ app_name }}-ssl"
+        dest: "/etc/nginx/sites-enabled/{{ app_name }}-ssl"
+        state: link
+
+    - name: Test nginx configuration
+      shell: nginx -t
+      register: nginx_test
+      changed_when: false
+
+    - name: Reload nginx if configuration is valid
+      systemd:
+        name: nginx
+        state: reloaded
+      when: nginx_test.rc == 0
+
+    - name: Verify SSL certificate
+      shell: |
+        echo | openssl s_client -servername {{ ssl_domain }} \
+          -connect {{ ansible_default_ipv4.address }}:443 2>/dev/null | \
+          openssl x509 -noout -dates
+      register: ssl_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Display SSL configuration summary
+      debug:
+        msg:
+          - "🔒 SSL/TLS configuration completed"
+          - "📋 Certificate type: {{ 'Let\\'s Encrypt' if environment == 'prod' else 'Self-signed' }}"
+          - "🌐 Domain: {{ ssl_domain }}"
+          - "📄 Certificate: {{ ssl_cert_path }}/{{ app_name }}.crt"
+          - "🔑 Private key: {{ ssl_key_path }}/{{ app_name }}.key"
+          - "✅ Nginx test: {{ 'PASSED' if nginx_test.rc == 0 else 'FAILED' }}"
+          - "🔐 Certificate validity: {{ ssl_verify.stdout.split('\\n')[0] if ssl_verify.rc == 0 else 'Check manually' }}"

@@ -1,0 +1,151 @@
+# ansible/playbooks/verify.yml - Deployment verification playbook
+---
+- name: Verify deployment and service health
+  hosts: webservers
+  gather_facts: true
+  vars:
+    health_check_timeout: 60
+    expected_services:
+      - nginx
+      - "{{ app_name | default('myapp') }}"
+      - docker
+    required_ports:
+      - 22    # SSH
+      - 80    # HTTP
+      - "{{ app_port | default(3000) }}"  # Application
+  
+  tasks:
+    - name: Check if all expected services are running
+      systemd:
+        name: "{{ item }}"
+        state: started
+      loop: "{{ expected_services }}"
+      register: service_status
+
+    - name: Verify application health endpoint
+      uri:
+        url: "http://{{ ansible_default_ipv4.address }}/health"
+        method: GET
+        timeout: "{{ health_check_timeout }}"
+        status_code: 200
+      register: health_check
+      retries: 3
+      delay: 10
+
+    - name: Test application root endpoint
+      uri:
+        url: "http://{{ ansible_default_ipv4.address }}/"
+        method: GET
+        timeout: 30
+        status_code: 200
+      register: root_check
+      retries: 2
+      delay: 5
+
+    - name: Check if required ports are listening
+      wait_for:
+        port: "{{ item }}"
+        host: "{{ ansible_default_ipv4.address }}"
+        timeout: 10
+      loop: "{{ required_ports }}"
+      register: port_check
+
+    - name: Test database connectivity
+      postgresql_ping:
+        login_host: "{{ database_host }}"
+        login_user: "{{ database_username }}"
+        login_password: "{{ database_password }}"
+        db: "{{ database_name }}"
+      register: db_test
+      when: database_host is defined
+
+    - name: Test S3 connectivity
+      shell: |
+        aws s3 ls s3://{{ s3_bucket_name }} --region {{ aws_region }}
+      become_user: "{{ app_user }}"
+      register: s3_test
+      changed_when: false
+      when: s3_bucket_name is defined
+
+    - name: Check disk usage
+      shell: df -h / | awk 'NR==2 {print $5}' | sed 's/%//'
+      register: disk_usage
+      changed_when: false
+
+    - name: Check memory usage  
+      shell: free | awk 'NR==2{printf "%.0f", $3*100/$2}'
+      register: memory_usage
+      changed_when: false
+
+    - name: Check system load
+      shell: uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//'
+      register: load_average
+      changed_when: false
+
+    - name: Verify SSL certificates (if SSL enabled)
+      stat:
+        path: "{{ ssl_cert_path }}/{{ app_name }}.crt"
+      register: ssl_cert_check
+      when: enable_ssl | default(false)
+
+    - name: Check log files exist and are writable
+      file:
+        path: "{{ item }}"
+        state: file
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+      loop:
+        - "{{ log_directory }}/health.log"
+        - "/var/log/nginx/access.log"
+        - "/var/log/nginx/error.log"
+      register: log_files_check
+
+    - name: Display verification results
+      debug:
+        msg:
+          - "🔍 DEPLOYMENT VERIFICATION RESULTS"
+          - "=================================="
+          - "✅ Services Status: {{ 'All services running' if service_status is succeeded else 'Some services failed' }}"
+          - "✅ Health Check: {{ 'PASSED' if health_check.status == 200 else 'FAILED' }}"
+          - "✅ Root Endpoint: {{ 'PASSED' if root_check.status == 200 else 'FAILED' }}"
+          - "✅ Port Accessibility: {{ 'PASSED' if port_check is succeeded else 'FAILED' }}"
+          - "✅ Database: {{ 'Connected' if (db_test.is_available | default(false)) else 'Failed or not configured' }}"
+          - "✅ S3 Access: {{ 'Accessible' if (s3_test.rc | default(1)) == 0 else 'Failed or not configured' }}"
+          - "✅ SSL Certificate: {{ 'Present' if (ssl_cert_check.stat.exists | default(false)) else 'Not configured' }}"
+          - ""
+          - "📊 System Metrics:"
+          - "  - Disk Usage: {{ disk_usage.stdout | default('N/A') }}%"
+          - "  - Memory Usage: {{ memory_usage.stdout | default('N/A') }}%"
+          - "  - Load Average: {{ load_average.stdout | default('N/A') }}"
+          - ""
+          - "🌐 Access URLs:"
+          - "  - Application: http://{{ ansible_default_ipv4.address }}"
+          - "  - Health Check: http://{{ ansible_default_ipv4.address }}/health"
+          - "  - Load Balancer: {{ load_balancer_dns | default('Not configured') }}"
+
+    - name: Fail if critical checks failed
+      fail:
+        msg: "❌ Deployment verification failed! Check the issues above."
+      when: >
+        service_status is failed or
+        health_check.status != 200 or
+        port_check is failed or
+        (db_test is defined and not db_test.is_available)
+
+    - name: Generate verification report
+      template:
+        src: verification_report.j2
+        dest: "/tmp/verification_report_{{ inventory_hostname }}_{{ ansible_date_time.epoch }}.json"
+        mode: '0644'
+      vars:
+        verification_results:
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          hostname: "{{ inventory_hostname }}"
+          services_status: "{{ 'PASSED' if service_status is succeeded else 'FAILED' }}"
+          health_check_status: "{{ 'PASSED' if health_check.status == 200 else 'FAILED' }}"
+          database_status: "{{ 'PASSED' if (db_test.is_available | default(false)) else 'FAILED' }}"
+          s3_status: "{{ 'PASSED' if (s3_test.rc | default(1)) == 0 else 'FAILED' }}"
+          disk_usage: "{{ disk_usage.stdout | default('N/A') }}"
+          memory_usage: "{{ memory_usage.stdout | default('N/A') }}"
+          load_average: "{{ load_average.stdout | default('N/A') }}"
+      delegate_to: localhost

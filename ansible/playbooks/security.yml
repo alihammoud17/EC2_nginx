@@ -1,0 +1,194 @@
+# ansible/playbooks/security.yml - Security hardening playbook
+---
+- name: Security hardening and compliance checks
+  hosts: webservers
+  become: true
+  vars:
+    security_updates_only: false
+    audit_log_file: "/var/log/security_audit.log"
+
+  tasks:
+    - name: Update package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install security updates
+      apt:
+        upgrade: "{{ 'safe' if security_updates_only else 'dist' }}"
+        autoremove: yes
+        autoclean: yes
+      register: security_updates
+
+    - name: Install additional security packages
+      apt:
+        name:
+          - aide                    # Advanced Intrusion Detection Environment
+          - rkhunter               # Rootkit Hunter
+          - chkrootkit            # Check for rootkits
+          - lynis                 # Security auditing tool
+          - unattended-upgrades   # Automatic security updates
+          - logwatch              # Log analysis and reporting
+          - psad                  # Port scan attack detector
+        state: present
+
+    - name: Configure unattended upgrades
+      template:
+        src: 50unattended-upgrades.j2
+        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Enable automatic security updates
+      template:
+        src: 20auto-upgrades.j2
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Configure SSH security
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        backup: yes
+      loop:
+        - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin no' }
+        - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
+        - { regexp: '^#?PubkeyAuthentication', line: 'PubkeyAuthentication yes' }
+        - { regexp: '^#?X11Forwarding', line: 'X11Forwarding no' }
+        - { regexp: '^#?MaxAuthTries', line: 'MaxAuthTries 3' }
+        - { regexp: '^#?ClientAliveInterval', line: 'ClientAliveInterval 300' }
+        - { regexp: '^#?ClientAliveCountMax', line: 'ClientAliveCountMax 2' }
+        - { regexp: '^#?Protocol', line: 'Protocol 2' }
+      notify: restart ssh
+
+    - name: Set kernel security parameters
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { name: 'net.ipv4.conf.default.rp_filter', value: '1' }
+        - { name: 'net.ipv4.conf.all.rp_filter', value: '1' }
+        - { name: 'net.ipv4.conf.all.accept_redirects', value: '0' }
+        - { name: 'net.ipv6.conf.all.accept_redirects', value: '0' }
+        - { name: 'net.ipv4.conf.all.send_redirects', value: '0' }
+        - { name: 'net.ipv4.conf.all.accept_source_route', value: '0' }
+        - { name: 'net.ipv6.conf.all.accept_source_route', value: '0' }
+        - { name: 'net.ipv4.conf.all.log_martians', value: '1' }
+        - { name: 'net.ipv4.icmp_echo_ignore_broadcasts', value: '1' }
+        - { name: 'net.ipv4.icmp_ignore_bogus_error_responses', value: '1' }
+        - { name: 'kernel.dmesg_restrict', value: '1' }
+
+    - name: Configure file permissions for sensitive files
+      file:
+        path: "{{ item.path }}"
+        mode: "{{ item.mode }}"
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+      loop:
+        - { path: '/etc/passwd', mode: '0644' }
+        - { path: '/etc/shadow', mode: '0640', group: 'shadow' }
+        - { path: '/etc/group', mode: '0644' }
+        - { path: '/etc/gshadow', mode: '0640', group: 'shadow' }
+        - { path: '/etc/ssh/sshd_config', mode: '0600' }
+
+    - name: Remove unnecessary packages
+      apt:
+        name:
+          - telnet
+          - rsh-client
+          - rsh-redone-client
+          - talk
+          - telnetd
+          - xinetd
+        state: absent
+
+    - name: Disable unnecessary services
+      systemd:
+        name: "{{ item }}"
+        enabled: no
+        state: stopped
+      loop:
+        - avahi-daemon
+        - cups
+        - nfs-common
+        - rpcbind
+      failed_when: false  # Service might not exist
+
+    - name: Configure audit logging
+      lineinfile:
+        path: /etc/audit/rules.d/audit.rules
+        line: "{{ item }}"
+        create: yes
+      loop:
+        - "-w /etc/passwd -p wa -k identity"
+        - "-w /etc/group -p wa -k identity"
+        - "-w /etc/shadow -p wa -k identity"
+        - "-w /etc/sudoers -p wa -k identity"
+        - "-w /var/log/auth.log -p wa -k authentication"
+        - "-w /var/log/nginx/ -p wa -k webserver"
+      notify: restart auditd
+
+    - name: Initialize AIDE database (first run)
+      shell: aide --init
+      args:
+        creates: /var/lib/aide/aide.db.new
+      register: aide_init
+
+    - name: Copy AIDE database
+      copy:
+        src: /var/lib/aide/aide.db.new
+        dest: /var/lib/aide/aide.db
+        remote_src: yes
+      when: aide_init.changed
+
+    - name: Create security audit script
+      template:
+        src: security_audit.sh.j2
+        dest: /usr/local/bin/security_audit.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Schedule regular security audits
+      cron:
+        name: "Weekly security audit"
+        minute: "0"
+        hour: "2"
+        weekday: "1"
+        job: "/usr/local/bin/security_audit.sh >> {{ audit_log_file }} 2>&1"
+        user: root
+
+    - name: Run security compliance check
+      shell: |
+        echo "Security Audit - $(date)" >> {{ audit_log_file }}
+        lynis audit system --quiet --log-file {{ audit_log_file }} || true
+        rkhunter --check --skip-keypress --report-warnings-only >> {{ audit_log_file }} 2>&1 || true
+        chkrootkit >> {{ audit_log_file }} 2>&1 || true
+      register: security_audit
+      changed_when: false
+
+    - name: Display security audit summary
+      debug:
+        msg:
+          - "🔒 Security hardening completed"
+          - "📋 Security updates: {{ security_updates.changed | default(false) | ternary('Applied', 'Up to date') }}"
+          - "🛡️  Security tools installed: AIDE, rkhunter, lynis, chkrootkit"
+          - "📊 Audit log: {{ audit_log_file }}"
+          - "⚡ Automatic updates: Enabled"
+
+  handlers:
+    - name: restart ssh
+      systemd:
+        name: ssh
+        state: restarted
+
+    - name: restart auditd
+      systemd:
+        name: auditd
+        state: restarted

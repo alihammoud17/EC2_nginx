@@ -130,9 +130,9 @@ setup_python() {
     print_status "Installing Python dependencies..."
     
     if command -v pip3 &> /dev/null; then
-        pip3 install -r requirements.txt
+        pip3 install -r utils/requirements.txt
     elif command -v pip &> /dev/null; then
-        pip install -r requirements.txt
+        pip install -r utils/requirements.txt
     else
         print_warning "pip not found. Please install Python dependencies manually."
     fi

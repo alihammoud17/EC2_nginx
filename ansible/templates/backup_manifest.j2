@@ -1,0 +1,36 @@
+# ansible/templates/backup_manifest.j2
+{
+  "backup_manifest": {
+    "metadata": {
+      "backup_id": "{{ backup_info.timestamp }}",
+      "hostname": "{{ backup_info.hostname }}",
+      "server_role": "{{ backup_info.server_role }}",
+      "timestamp": "{{ backup_info.timestamp }}",
+      "app_version": "{{ backup_info.app_version }}",
+      "environment": "{{ environment | default('unknown') }}"
+    },
+    "system_info": {
+      "os": "{{ ansible_distribution }} {{ ansible_distribution_version }}",
+      "kernel": "{{ ansible_kernel }}",
+      "hostname": "{{ ansible_hostname }}",
+      "ip_address": "{{ ansible_default_ipv4.address }}"
+    },
+    "backup_files": [
+      {% for file in backup_info.backup_files %}
+      {% if file is defined %}
+      {
+        "filename": "{{ file }}",
+        "type": "{{ 'database' if 'database' in file else 'application' if 'application' in file else 'config' if 'config' in file else 'logs' if 'logs' in file else 'unknown' }}",
+        "compressed": {{ 'true' if '.tar.gz' in file or '.sql.gz' in file else 'false' }}
+      }{{ ',' if not loop.last else '' }}
+      {% endif %}
+      {% endfor %}
+    ],
+    "backup_configuration": {
+      "retention_days": {{ backup_retention_days | default(30) }},
+      "s3_upload": {{ 'true' if s3_bucket_name is defined else 'false' }},
+      "includes_database": {{ 'true' if backup_info.server_role == 'primary' else 'false' }},
+      "compression_enabled": true
+    }
+  }
+}

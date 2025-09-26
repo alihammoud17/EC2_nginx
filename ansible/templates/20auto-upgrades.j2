@@ -1,0 +1,99 @@
+# ansible/templates/20auto-upgrades.j2
+// {{ ansible_managed }}
+// Enable the update/upgrade script (0=disable)
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+APT::Periodic::Unattended-Upgrade "1";
+
+// Clean downloaded packages
+APT::Periodic::MaxAge "30";
+APT::Periodic::MaxSize "500";
+
+---
+# ansible/templates/jail.local.j2
+# {{ ansible_managed }}
+# Fail2Ban configuration for {{ app_name }}
+
+[DEFAULT]
+# "ignoreip" can be an IP address, a CIDR mask or a DNS host
+ignoreip = 127.0.0.1/8 ::1 {{ ansible_default_ipv4.address }}
+
+# External command that will take an tagged arguments to ignore, e.g. <ip>,
+# and return true if the IP is to be ignored. False otherwise.
+ignorecommand =
+
+# "bantime" is the number of seconds that a host is banned.
+bantime = 3600
+
+# A host is banned if it has generated "maxretry" during the last "findtime"
+# seconds.
+findtime = 600
+
+# "maxretry" is the number of failures before a host get banned.
+maxretry = 3
+
+# "backend" specifies the backend used to get files modification.
+backend = auto
+
+# "usedns" specifies if jails should trust hostnames in logs,
+#   warn when DNS lookups are performed, or ignore all hostnames in logs
+usedns = warn
+
+# Default protocol
+protocol = tcp
+
+# Specify chain where jumps would need to be added in iptables-* actions
+chain = INPUT
+
+# Ports to be banned
+# Usually should be overridden in a particular jail
+port = 0:65535
+
+# Default action
+action = %(action_)s
+
+#
+# JAILS
+#
+
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 3600
+
+[nginx-http-auth]
+enabled = true
+filter = nginx-http-auth
+port = http,https
+logpath = /var/log/nginx/error.log
+maxretry = 5
+bantime = 600
+
+[nginx-limit-req]
+enabled = true
+filter = nginx-limit-req
+port = http,https
+logpath = /var/log/nginx/error.log
+maxretry = 10
+bantime = 600
+
+[nginx-botsearch]
+enabled = true
+filter = nginx-botsearch
+port = http,https
+logpath = /var/log/nginx/access.log
+maxretry = 2
+bantime = 3600
+
+# Custom jail for application
+[{{ app_name }}-app]
+enabled = true
+filter = {{ app_name }}-app
+port = {{ app_port | default(3000) }}
+logpath = {{ log_directory }}/{{ app_name }}.log
+maxretry = 5
+bantime = 1800

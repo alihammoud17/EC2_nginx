@@ -1,0 +1,121 @@
+# ansible/inventory/group_vars/webservers.yml - Web server specific variables
+---
+# Nginx configuration
+nginx_conf_template: |
+  server {
+      listen 80;
+      server_name {{ ansible_default_ipv4.address }};
+      
+      # Security headers
+      add_header X-Frame-Options DENY;
+      add_header X-Content-Type-Options nosniff;
+      add_header X-XSS-Protection "1; mode=block";
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+      
+      # Client upload size
+      client_max_body_size {{ nginx_client_max_body_size }};
+      
+      # Logging
+      access_log /var/log/nginx/{{ project_name }}_access.log;
+      error_log /var/log/nginx/{{ project_name }}_error.log;
+      
+      # Application proxy
+      location / {
+          proxy_pass http://127.0.0.1:{{ app_port }};
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          
+          # Proxy timeouts
+          proxy_connect_timeout 60s;
+          proxy_send_timeout 60s;
+          proxy_read_timeout 60s;
+          
+          # WebSocket support
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection 'upgrade';
+          proxy_cache_bypass $http_upgrade;
+      }
+      
+      # Health check endpoint
+      location /health {
+          access_log off;
+          proxy_pass http://127.0.0.1:{{ app_port }}/health;
+          proxy_set_header Host $host;
+      }
+      
+      # Static files
+      location /static/ {
+          alias {{ app_directory }}/public/static/;
+          expires 1y;
+          add_header Cache-Control "public, immutable";
+          gzip_static on;
+      }
+      
+      # Favicon
+      location /favicon.ico {
+          alias {{ app_directory }}/public/favicon.ico;
+          expires 1y;
+          add_header Cache-Control "public, immutable";
+      }
+  }
+
+# Node.js application configuration
+nodejs_packages:
+  - express
+  - pg
+  - aws-sdk
+  - helmet
+  - cors
+  - compression
+  - morgan
+  - dotenv
+  - joi
+  - bcrypt
+  - jsonwebtoken
+
+# System service configuration
+systemd_services:
+  - name: "{{ project_name }}"
+    description: "{{ project_name }} Node.js application"
+    user: "{{ app_user }}"
+    working_directory: "{{ app_directory }}"
+    exec_start: "/usr/bin/node {{ app_directory }}/app.js"
+    environment_file: "{{ app_directory }}/.env"
+    restart: "on-failure"
+    restart_sec: 5
+
+# Firewall rules for web servers
+firewall_rules:
+  - rule: allow
+    port: 22
+    proto: tcp
+    comment: "SSH"
+  - rule: allow
+    port: 80
+    proto: tcp
+    comment: "HTTP"
+  - rule: allow
+    port: 443
+    proto: tcp
+    comment: "HTTPS"
+    enabled: "{{ enable_ssl }}"
+
+# Fail2Ban jails
+fail2ban_jails:
+  - name: sshd
+    enabled: true
+    port: ssh
+    filter: sshd
+    logpath: /var/log/auth.log
+    maxretry: 3
+    bantime: 600
+  - name: nginx-http-auth
+    enabled: true
+    port: "http,https"
+    filter: nginx-http-auth
+    logpath: /var/log/nginx/error.log
+    maxretry: 5
+    bantime: 600

@@ -1,0 +1,53 @@
+# ansible/templates/verification_report.j2
+{
+  "verification_report": {
+    "metadata": {
+      "timestamp": "{{ verification_results.timestamp }}",
+      "hostname": "{{ verification_results.hostname }}",
+      "environment": "{{ environment | default('unknown') }}",
+      "ansible_user": "{{ ansible_user }}",
+      "report_version": "1.0"
+    },
+    "system_info": {
+      "os": "{{ ansible_distribution }} {{ ansible_distribution_version }}",
+      "kernel": "{{ ansible_kernel }}",
+      "architecture": "{{ ansible_architecture }}",
+      "cpu_cores": {{ ansible_processor_vcpus }},
+      "memory_mb": {{ ansible_memtotal_mb }},
+      "hostname": "{{ ansible_hostname }}",
+      "fqdn": "{{ ansible_fqdn }}",
+      "ip_address": "{{ ansible_default_ipv4.address }}",
+      "uptime_seconds": {{ ansible_uptime_seconds | default(0) }}
+    },
+    "service_checks": {
+      "services_status": "{{ verification_results.services_status }}",
+      "health_check_status": "{{ verification_results.health_check_status }}",
+      "database_status": "{{ verification_results.database_status }}",
+      "s3_status": "{{ verification_results.s3_status }}"
+    },
+    "performance_metrics": {
+      "disk_usage_percent": "{{ verification_results.disk_usage }}",
+      "memory_usage_percent": "{{ verification_results.memory_usage }}",
+      "load_average": "{{ verification_results.load_average }}"
+    },
+    "network_info": {
+      "interfaces": {{ ansible_interfaces | to_json }},
+      "default_ipv4": {{ ansible_default_ipv4 | to_json }},
+      "dns_nameservers": {{ ansible_dns.nameservers | default([]) | to_json }}
+    },
+    "storage_info": {
+      "mounts": [
+        {% for mount in ansible_mounts %}
+        {
+          "device": "{{ mount.device }}",
+          "mount": "{{ mount.mount }}",
+          "fstype": "{{ mount.fstype }}",
+          "size_gb": {{ (mount.size_total / 1024 / 1024 / 1024) | round(2) }},
+          "available_gb": {{ (mount.size_available / 1024 / 1024 / 1024) | round(2) }},
+          "used_percent": {{ ((mount.size_total - mount.size_available) * 100 / mount.size_total) | round(1) }}
+        }{{ ',' if not loop.last else '' }}
+        {% endfor %}
+      ]
+    }
+  }
+}

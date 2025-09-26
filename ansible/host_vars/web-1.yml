@@ -1,0 +1,46 @@
+# ansible/inventory/host_vars/web-1.yml - Primary web server configuration
+---
+server_role: primary
+enable_cron_jobs: true
+enable_database_backups: true
+
+# Server-specific configuration
+server_config:
+  is_primary: true
+  handles_cron_jobs: true
+  backup_role: true
+
+# Monitoring configuration
+monitoring_config:
+  detailed_logging: true
+  performance_monitoring: true
+  alert_threshold:
+    cpu_usage: 80
+    memory_usage: 85
+    disk_usage: 80
+
+# Cron jobs (only on primary server)
+cron_jobs:
+  - name: "Application health check"
+    minute: "*/5"
+    job: "{{ app_directory }}/health_check.sh >> {{ log_directory }}/health.log 2>&1"
+    user: "{{ app_user }}"
+  
+  - name: "Database backup"
+    minute: "0"
+    hour: "2"
+    job: "{{ app_directory }}/scripts/backup_db.sh >> {{ log_directory }}/backup.log 2>&1"
+    user: "{{ app_user }}"
+  
+  - name: "Log rotation check"
+    minute: "30"
+    hour: "1"
+    job: "/usr/sbin/logrotate -f /etc/logrotate.d/{{ project_name }}"
+    user: "root"
+  
+  - name: "System cleanup"
+    minute: "0"
+    hour: "3"
+    weekday: "0"  # Sunday
+    job: "{{ app_directory }}/scripts/cleanup.sh >> {{ log_directory }}/cleanup.log 2>&1"
+    user: "{{ app_user }}"

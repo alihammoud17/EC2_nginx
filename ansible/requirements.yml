@@ -1,0 +1,23 @@
+# ansible/requirements.yml - Ansible requirements
+---
+# Collections
+collections:
+  - name: community.general
+    version: ">=7.0.0"
+  - name: community.postgresql
+    version: ">=3.0.0"
+  - name: amazon.aws
+    version: ">=6.0.0"
+  - name: community.crypto
+    version: ">=2.0.0"
+  - name: community.docker
+    version: ">=3.0.0"
+
+# Roles (if using external roles)
+roles:
+  - name: geerlingguy.nodejs
+    version: ">=6.0.0"
+  - name: geerlingguy.nginx
+    version: ">=3.0.0"
+  - name: geerlingguy.docker
+    version: ">=6.0.0"

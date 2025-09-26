@@ -1,0 +1,718 @@
+---
+# ansible/site.yml - Main playbook with PostgreSQL and S3 integration
+- name: Configure web servers with database and S3 storage
+  hosts: webservers
+  become: true
+  gather_facts: true
+  vars:
+    # Application configuration
+    app_name: "{{ project_name | default('myapp') }}"
+    app_user: "{{ app_user | default('ubuntu') }}"
+    app_directory: "/opt/{{ app_name }}"
+    
+    # Database configuration
+    postgres_version: "15"
+    db_host: "{{ database_host }}"
+    db_port: "{{ database_port | default(5432) }}"
+    db_name: "{{ database_name }}"
+    db_username: "{{ database_username }}"
+    db_password: "{{ database_password }}"
+    
+    # S3 configuration
+    s3_bucket: "{{ s3_bucket_name }}"
+    aws_region: "{{ aws_region | default('us-west-2') }}"
+    
+    # Node.js configuration
+    nodejs_version: "18"
+    
+    # SSL/TLS configuration
+    enable_ssl: "{{ enable_ssl | default(false) }}"
+    ssl_cert_path: "/etc/ssl/certs"
+    ssl_key_path: "/etc/ssl/private"
+    
+    # Monitoring configuration
+    enable_monitoring: "{{ enable_monitoring | default(true) }}"
+    enable_cloudwatch: "{{ enable_cloudwatch | default(true) }}"
+    
+    # Application configuration
+    app_port: "{{ app_port | default(3000) }}"
+    max_upload_size: "{{ max_upload_size | default('100m') }}"
+    
+    # Security configuration
+    enable_firewall: "{{ enable_firewall | default(true) }}"
+    enable_fail2ban: "{{ enable_fail2ban | default(true) }}"
+
+  pre_tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      tags: ['system', 'always']
+
+    - name: Install system dependencies
+      apt:
+        name:
+          - curl
+          - wget
+          - unzip
+          - git
+          - build-essential
+          - software-properties-common
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
+          - python3-pip
+          - python3-venv
+          - python3-setuptools
+          - jq
+          - htop
+          - vim
+          - tree
+          - rsync
+          - logrotate
+        state: present
+      tags: ['system']
+
+    - name: Create application user
+      user:
+        name: "{{ app_user }}"
+        shell: /bin/bash
+        create_home: yes
+        home: "/home/{{ app_user }}"
+        groups: sudo
+        append: yes
+      tags: ['users']
+
+    - name: Create application directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0755'
+      loop:
+        - "{{ app_directory }}"
+        - "{{ app_directory }}/logs"
+        - "{{ app_directory }}/tmp"
+        - "{{ app_directory }}/config"
+        - "{{ app_directory }}/public"
+        - "{{ app_directory }}/public/static"
+        - "/var/log/{{ app_name }}"
+      tags: ['application', 'directories']
+
+  tasks:
+    # AWS CLI Installation
+    - name: Install AWS CLI
+      block:
+        - name: Check if AWS CLI v2 is installed
+          command: aws --version
+          register: aws_version_check
+          failed_when: false
+          changed_when: false
+
+        - name: Download AWS CLI v2
+          get_url:
+            url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+            dest: /tmp/awscliv2.zip
+            mode: '0644'
+          when: aws_version_check.rc != 0 or 'aws-cli/2' not in aws_version_check.stdout
+
+        - name: Extract AWS CLI v2
+          unarchive:
+            src: /tmp/awscliv2.zip
+            dest: /tmp
+            remote_src: yes
+          when: aws_version_check.rc != 0 or 'aws-cli/2' not in aws_version_check.stdout
+
+        - name: Install AWS CLI v2
+          shell: /tmp/aws/install --update
+          when: aws_version_check.rc != 0 or 'aws-cli/2' not in aws_version_check.stdout
+
+        - name: Clean up AWS CLI installation files
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/awscliv2.zip
+            - /tmp/aws
+          when: aws_version_check.rc != 0 or 'aws-cli/2' not in aws_version_check.stdout
+
+        - name: Verify AWS CLI installation
+          command: aws --version
+          register: aws_version
+          changed_when: false
+
+        - name: Display AWS CLI version
+          debug:
+            var: aws_version.stdout
+      tags: ['aws']
+
+    # PostgreSQL Client Installation
+    - name: Install PostgreSQL client and dependencies
+      block:
+        - name: Add PostgreSQL APT repository key
+          apt_key:
+            url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+            state: present
+
+        - name: Add PostgreSQL APT repository
+          apt_repository:
+            repo: "deb http://apt.postgresql.org/pub/repos/apt/ {{ ansible_distribution_release }}-pgdg main"
+            state: present
+
+        - name: Install PostgreSQL client and development libraries
+          apt:
+            name:
+              - "postgresql-client-{{ postgres_version }}"
+              - "libpq-dev"
+              - "postgresql-contrib"
+            state: present
+            update_cache: yes
+
+        - name: Install Python PostgreSQL adapter
+          pip:
+            name: 
+              - psycopg2-binary
+              - pg_activity
+            state: present
+      tags: ['database', 'postgresql']
+
+    # Database Connectivity Test
+    - name: Test database connectivity
+      postgresql_ping:
+        login_host: "{{ db_host }}"
+        login_port: "{{ db_port }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ db_name }}"
+      register: db_connection
+      tags: ['database', 'test']
+
+    - name: Display database connection status
+      debug:
+        msg: "Database connection: {{ 'successful' if db_connection.is_available else 'failed' }}"
+      tags: ['database', 'test']
+
+    # Node.js Installation
+    - name: Install Node.js
+      block:
+        - name: Add NodeSource repository key
+          apt_key:
+            url: https://deb.nodesource.com/gpgkey/nodesource.gpg.key
+            state: present
+
+        - name: Add NodeSource repository
+          apt_repository:
+            repo: "deb https://deb.nodesource.com/node_{{ nodejs_version }}.x {{ ansible_distribution_release }} main"
+            state: present
+
+        - name: Install Node.js
+          apt:
+            name: nodejs
+            state: present
+            update_cache: yes
+
+        - name: Install global npm packages
+          npm:
+            name: "{{ item }}"
+            global: yes
+            state: present
+          loop:
+            - pm2
+            - nodemon
+            - npm-check-updates
+
+        - name: Verify Node.js installation
+          command: node --version
+          register: node_version
+          changed_when: false
+
+        - name: Display Node.js version
+          debug:
+            var: node_version.stdout
+
+        - name: Verify npm installation
+          command: npm --version
+          register: npm_version
+          changed_when: false
+
+        - name: Display npm version
+          debug:
+            var: npm_version.stdout
+      tags: ['nodejs']
+
+    # Docker Installation
+    - name: Install Docker
+      block:
+        - name: Add Docker GPG key
+          apt_key:
+            url: https://download.docker.com/linux/ubuntu/gpg
+            keyring: /usr/share/keyrings/docker-archive-keyring.gpg
+            state: present
+
+        - name: Add Docker repository
+          apt_repository:
+            repo: "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+            state: present
+
+        - name: Install Docker packages
+          apt:
+            name:
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+              - docker-buildx-plugin
+              - docker-compose-plugin
+            state: present
+            update_cache: yes
+
+        - name: Start and enable Docker service
+          systemd:
+            name: docker
+            state: started
+            enabled: yes
+
+        - name: Add application user to docker group
+          user:
+            name: "{{ app_user }}"
+            groups: docker
+            append: yes
+
+        - name: Verify Docker installation
+          command: docker --version
+          register: docker_version
+          changed_when: false
+
+        - name: Display Docker version
+          debug:
+            var: docker_version.stdout
+      tags: ['docker']
+
+    # Nginx Installation and Configuration
+    - name: Install and configure Nginx
+      block:
+        - name: Install Nginx
+          apt:
+            name: nginx
+            state: present
+
+        - name: Remove default Nginx site
+          file:
+            path: /etc/nginx/sites-enabled/default
+            state: absent
+          notify: restart nginx
+
+        - name: Create Nginx configuration for application
+          template:
+            src: nginx.conf.j2
+            dest: "/etc/nginx/sites-available/{{ app_name }}"
+            owner: root
+            group: root
+            mode: '0644'
+            backup: yes
+          notify: restart nginx
+
+        - name: Enable application site
+          file:
+            src: "/etc/nginx/sites-available/{{ app_name }}"
+            dest: "/etc/nginx/sites-enabled/{{ app_name }}"
+            state: link
+          notify: restart nginx
+
+        - name: Test Nginx configuration
+          command: nginx -t
+          register: nginx_syntax
+          changed_when: false
+
+        - name: Display Nginx test results
+          debug:
+            var: nginx_syntax.stderr_lines
+
+        - name: Create nginx log directory
+          file:
+            path: "/var/log/nginx"
+            state: directory
+            owner: www-data
+            group: adm
+            mode: '0755'
+
+        - name: Start and enable Nginx
+          systemd:
+            name: nginx
+            state: started
+            enabled: yes
+      tags: ['nginx', 'webserver']
+
+    # SSL Configuration (if enabled)
+    - name: Configure SSL certificates
+      block:
+        - name: Install Certbot
+          apt:
+            name:
+              - certbot
+              - python3-certbot-nginx
+            state: present
+
+        - name: Create SSL certificate directories
+          file:
+            path: "{{ item }}"
+            state: directory
+            owner: root
+            group: root
+            mode: '0755'
+          loop:
+            - "{{ ssl_cert_path }}"
+            - "{{ ssl_key_path }}"
+
+        - name: Generate self-signed SSL certificate for testing
+          shell: |
+            openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+            -keyout {{ ssl_key_path }}/{{ app_name }}.key \
+            -out {{ ssl_cert_path }}/{{ app_name }}.crt \
+            -subj "/C=US/ST=State/L=City/O=Organization/CN={{ ansible_default_ipv4.address }}"
+          args:
+            creates: "{{ ssl_cert_path }}/{{ app_name }}.crt"
+      when: enable_ssl | bool
+      tags: ['ssl', 'certificates']
+
+    # Application Configuration
+    - name: Create application environment file
+      template:
+        src: app.env.j2
+        dest: "{{ app_directory }}/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0600'
+        backup: yes
+      notify: restart application
+      tags: ['application', 'configuration']
+
+    - name: Create database initialization script
+      template:
+        src: init_db.sql.j2
+        dest: "{{ app_directory }}/init_db.sql"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0644'
+      tags: ['database', 'initialization']
+
+    - name: Create S3 configuration script
+      template:
+        src: s3_setup.sh.j2
+        dest: "{{ app_directory }}/s3_setup.sh"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0755'
+      tags: ['s3', 'configuration']
+
+    # S3 Connectivity Test
+    - name: Test S3 connectivity
+      shell: |
+        aws s3 ls s3://{{ s3_bucket }} --region {{ aws_region }}
+      become_user: "{{ app_user }}"
+      register: s3_test
+      failed_when: false
+      changed_when: false
+      tags: ['s3', 'test']
+
+    - name: Display S3 connection status
+      debug:
+        msg: "S3 connection: {{ 'successful' if s3_test.rc == 0 else 'failed - ' + s3_test.stderr }}"
+      tags: ['s3', 'test']
+
+    # Application Service Configuration
+    - name: Create systemd service for application
+      template:
+        src: app.service.j2
+        dest: "/etc/systemd/system/{{ app_name }}.service"
+        owner: root
+        group: root
+        mode: '0644'
+        backup: yes
+      notify: 
+        - reload systemd
+        - restart application
+      tags: ['application', 'systemd']
+
+    # Log Rotation Configuration
+    - name: Create log rotation configuration
+      template:
+        src: app.logrotate.j2
+        dest: "/etc/logrotate.d/{{ app_name }}"
+        owner: root
+        group: root
+        mode: '0644'
+      tags: ['logging']
+
+    # Monitoring and Health Checks
+    - name: Setup monitoring and health checks
+      block:
+        - name: Create health check script
+          template:
+            src: health_check.sh.j2
+            dest: "{{ app_directory }}/health_check.sh"
+            owner: "{{ app_user }}"
+            group: "{{ app_user }}"
+            mode: '0755'
+
+        - name: Create system monitoring script
+          template:
+            src: system_monitor.sh.j2
+            dest: "{{ app_directory }}/system_monitor.sh"
+            owner: "{{ app_user }}"
+            group: "{{ app_user }}"
+            mode: '0755'
+
+        - name: Create monitoring cron jobs
+          cron:
+            name: "{{ item.name }}"
+            minute: "{{ item.minute }}"
+            user: "{{ app_user }}"
+            job: "{{ item.job }}"
+          loop:
+            - name: "Application health check"
+              minute: "*/5"
+              job: "{{ app_directory }}/health_check.sh >> /var/log/{{ app_name }}/health.log 2>&1"
+            - name: "System monitoring"
+              minute: "*/10"
+              job: "{{ app_directory }}/system_monitor.sh >> /var/log/{{ app_name }}/system.log 2>&1"
+      when: enable_monitoring | bool
+      tags: ['monitoring', 'health-check']
+
+    # CloudWatch Agent Installation
+    - name: Install CloudWatch Agent
+      block:
+        - name: Download CloudWatch Agent
+          get_url:
+            url: https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+            dest: /tmp/amazon-cloudwatch-agent.rpm
+            mode: '0644'
+
+        - name: Install CloudWatch Agent
+          shell: rpm -U /tmp/amazon-cloudwatch-agent.rpm
+          args:
+            creates: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent
+
+        - name: Create CloudWatch Agent configuration
+          template:
+            src: cloudwatch-agent.json.j2
+            dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Start CloudWatch Agent
+          shell: |
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+            -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+          register: cloudwatch_start
+          changed_when: "'Configuration validation first' in cloudwatch_start.stdout"
+      when: enable_cloudwatch | bool
+      tags: ['monitoring', 'cloudwatch']
+
+    # Application Dependencies
+    - name: Install application dependencies
+      block:
+        - name: Copy package.json template
+          template:
+            src: package.json.j2
+            dest: "{{ app_directory }}/package.json"
+            owner: "{{ app_user }}"
+            group: "{{ app_user }}"
+            mode: '0644'
+            backup: yes
+
+        - name: Install npm dependencies
+          npm:
+            path: "{{ app_directory }}"
+            production: yes
+            state: present
+          become_user: "{{ app_user }}"
+          register: npm_install
+
+        - name: Display npm install results
+          debug:
+            var: npm_install
+      tags: ['application', 'dependencies']
+
+    # Security Configuration
+    - name: Configure security
+      block:
+        - name: Install and configure UFW firewall
+          block:
+            - name: Install UFW
+              apt:
+                name: ufw
+                state: present
+
+            - name: Reset UFW to default
+              ufw:
+                state: reset
+              when: enable_firewall | bool
+
+            - name: Set UFW default policies
+              ufw:
+                policy: "{{ item.policy }}"
+                direction: "{{ item.direction }}"
+              loop:
+                - { policy: deny, direction: incoming }
+                - { policy: allow, direction: outgoing }
+              when: enable_firewall | bool
+
+            - name: Allow SSH
+              ufw:
+                rule: allow
+                port: '22'
+                proto: tcp
+              when: enable_firewall | bool
+
+            - name: Allow HTTP
+              ufw:
+                rule: allow
+                port: '80'
+                proto: tcp
+              when: enable_firewall | bool
+
+            - name: Allow HTTPS
+              ufw:
+                rule: allow
+                port: '443'
+                proto: tcp
+              when: enable_firewall | bool and enable_ssl | bool
+
+            - name: Allow application port from localhost
+              ufw:
+                rule: allow
+                port: "{{ app_port }}"
+                proto: tcp
+                src: '127.0.0.1'
+              when: enable_firewall | bool
+
+            - name: Enable UFW
+              ufw:
+                state: enabled
+                logging: 'on'
+              when: enable_firewall | bool
+
+        - name: Install and configure Fail2Ban
+          block:
+            - name: Install Fail2Ban
+              apt:
+                name: fail2ban
+                state: present
+
+            - name: Create Fail2Ban jail configuration
+              template:
+                src: jail.local.j2
+                dest: /etc/fail2ban/jail.local
+                owner: root
+                group: root
+                mode: '0644'
+                backup: yes
+              notify: restart fail2ban
+
+            - name: Start and enable Fail2Ban
+              systemd:
+                name: fail2ban
+                state: started
+                enabled: yes
+          when: enable_fail2ban | bool
+
+        - name: Configure SSH security
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            regexp: "{{ item.regexp }}"
+            line: "{{ item.line }}"
+            backup: yes
+          loop:
+            - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin no' }
+            - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
+            - { regexp: '^#?PubkeyAuthentication', line: 'PubkeyAuthentication yes' }
+            - { regexp: '^#?X11Forwarding', line: 'X11Forwarding no' }
+          notify: restart ssh
+      when: enable_firewall | bool or enable_fail2ban | bool
+      tags: ['security', 'firewall']
+
+  handlers:
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart application
+      systemd:
+        name: "{{ app_name }}"
+        state: restarted
+
+    - name: restart fail2ban
+      systemd:
+        name: fail2ban
+        state: restarted
+
+    - name: restart ssh
+      systemd:
+        name: ssh
+        state: restarted
+
+  post_tasks:
+    - name: Verify all services are running
+      systemd:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - nginx
+        - docker
+        - "{{ app_name }}"
+      tags: ['verification']
+
+    - name: Wait for application to start
+      wait_for:
+        port: "{{ app_port }}"
+        host: 127.0.0.1
+        timeout: 60
+      tags: ['verification']
+
+    - name: Test application health endpoint
+      uri:
+        url: "http://127.0.0.1:{{ app_port }}/health"
+        method: GET
+        timeout: 30
+      register: health_check
+      retries: 3
+      delay: 10
+      tags: ['verification']
+
+    - name: Display application URLs and information
+      debug:
+        msg:
+          - "✅ Deployment completed successfully!"
+          - ""
+          - "🌐 Application URLs:"
+          - "  - Load Balancer: {{ load_balancer_dns | default('N/A') }}"
+          - "  - Direct Access: http://{{ ansible_default_ipv4.address }}"
+          - "  - Health Check: http://{{ ansible_default_ipv4.address }}/health"
+          - ""
+          - "🗄️  Database Information:"
+          - "  - Host: {{ db_host }}"
+          - "  - Database: {{ db_name }}"
+          - "  - Port: {{ db_port }}"
+          - ""
+          - "☁️  S3 Information:"
+          - "  - Bucket: {{ s3_bucket }}"
+          - "  - Region: {{ aws_region }}"
+          - ""
+          - "📊 Monitoring:"
+          - "  - Health checks: Every 5 minutes"
+          - "  - System monitoring: Every 10 minutes"
+          - "  - CloudWatch: {{ 'Enabled' if enable_cloudwatch else 'Disabled' }}"
+          - ""
+          - "🔐 Security:"
+          - "  - Firewall: {{ 'Enabled' if enable_firewall else 'Disabled' }}"
+          - "  - Fail2Ban: {{ 'Enabled' if enable_fail2ban else 'Disabled' }}"
+          - "  - SSL: {{ 'Enabled' if enable_ssl else 'Disabled' }}"
+      tags: ['information']

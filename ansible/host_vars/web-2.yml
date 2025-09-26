@@ -1,0 +1,27 @@
+# ansible/inventory/host_vars/web-2.yml - Secondary web server configuration
+---
+server_role: secondary
+enable_cron_jobs: false
+enable_database_backups: false
+
+# Server-specific configuration
+server_config:
+  is_primary: false
+  handles_cron_jobs: false
+  backup_role: false
+
+# Monitoring configuration
+monitoring_config:
+  detailed_logging: false
+  performance_monitoring: true
+  alert_threshold:
+    cpu_usage: 85
+    memory_usage: 90
+    disk_usage: 85
+
+# Minimal cron jobs (only essential ones)
+cron_jobs:
+  - name: "Basic health check"
+    minute: "*/10"
+    job: "{{ app_directory }}/health_check.sh >> {{ log_directory }}/health.log 2>&1"
+    user: "{{ app_user }}"

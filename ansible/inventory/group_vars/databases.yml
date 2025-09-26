@@ -1,0 +1,25 @@
+# ansible/inventory/group_vars/databases.yml - Database specific variables (for reference)
+---
+# Database connection settings
+database_settings:
+  host: "{{ database_host }}"
+  port: "{{ database_port }}"
+  name: "{{ database_name }}"
+  username: "{{ database_username }}"
+  password: "{{ database_password }}"
+  ssl_mode: require
+  
+# Database tools and utilities
+database_tools:
+  - postgresql-client
+  - pgcli
+  - pg_activity
+  - pgtop
+
+# Backup configuration
+database_backup:
+  enabled: true
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  retention_days: 30
+  s3_bucket: "{{ s3_bucket_name }}"
+  s3_prefix: "database-backups"

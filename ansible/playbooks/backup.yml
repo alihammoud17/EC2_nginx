@@ -1,0 +1,115 @@
+# ansible/playbooks/backup.yml - Backup playbook
+---
+- name: Create comprehensive system backup
+  hosts: webservers
+  become: true
+  vars:
+    backup_timestamp: "{{ ansible_date_time.strftime('%Y%m%d_%H%M%S') }}"
+    backup_base_dir: "/opt/backups"
+    s3_backup_bucket: "{{ s3_bucket_name }}-backups"
+    backup_retention_days: 30
+
+  tasks:
+    - name: Create backup directory
+      file:
+        path: "{{ backup_base_dir }}/{{ backup_timestamp }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0755'
+
+    - name: Backup application files
+      archive:
+        path: "{{ app_directory }}"
+        dest: "{{ backup_base_dir }}/{{ backup_timestamp }}/application_{{ backup_timestamp }}.tar.gz"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0640'
+
+    - name: Backup configuration files
+      archive:
+        path:
+          - "/etc/nginx/sites-available/{{ app_name }}"
+          - "/etc/systemd/system/{{ app_name }}.service"
+          - "/etc/logrotate.d/{{ app_name }}"
+        dest: "{{ backup_base_dir }}/{{ backup_timestamp }}/config_{{ backup_timestamp }}.tar.gz"
+        mode: '0640'
+
+    - name: Backup logs
+      archive:
+        path: "{{ log_directory }}"
+        dest: "{{ backup_base_dir }}/{{ backup_timestamp }}/logs_{{ backup_timestamp }}.tar.gz"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0640'
+
+    - name: Create database backup (if primary server)
+      shell: |
+        PGPASSWORD="{{ database_password }}" pg_dump \
+          -h "{{ database_host }}" \
+          -U "{{ database_username }}" \
+          -d "{{ database_name }}" \
+          --clean --if-exists \
+          > "{{ backup_base_dir }}/{{ backup_timestamp }}/database_{{ backup_timestamp }}.sql"
+      become_user: "{{ app_user }}"
+      when: server_role == "primary" and database_host is defined
+      register: db_backup_result
+
+    - name: Compress database backup
+      archive:
+        path: "{{ backup_base_dir }}/{{ backup_timestamp }}/database_{{ backup_timestamp }}.sql"
+        dest: "{{ backup_base_dir }}/{{ backup_timestamp }}/database_{{ backup_timestamp }}.sql.gz"
+        remove: yes
+      when: server_role == "primary" and db_backup_result is succeeded
+
+    - name: Generate backup manifest
+      template:
+        src: backup_manifest.j2
+        dest: "{{ backup_base_dir }}/{{ backup_timestamp }}/manifest.json"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0644'
+      vars:
+        backup_info:
+          timestamp: "{{ backup_timestamp }}"
+          hostname: "{{ inventory_hostname }}"
+          server_role: "{{ server_role | default('secondary') }}"
+          app_version: "{{ app_version | default('unknown') }}"
+          backup_files:
+            - "application_{{ backup_timestamp }}.tar.gz"
+            - "config_{{ backup_timestamp }}.tar.gz" 
+            - "logs_{{ backup_timestamp }}.tar.gz"
+            - "{{ 'database_' + backup_timestamp + '.sql.gz' if server_role == 'primary' else omit }}"
+
+    - name: Upload backup to S3 (if configured)
+      shell: |
+        aws s3 cp "{{ backup_base_dir }}/{{ backup_timestamp }}" \
+          "s3://{{ s3_backup_bucket }}/{{ inventory_hostname }}/{{ backup_timestamp }}/" \
+          --recursive \
+          --region "{{ aws_region }}"
+      become_user: "{{ app_user }}"
+      when: s3_bucket_name is defined
+      register: s3_upload_result
+
+    - name: Clean up old local backups
+      find:
+        paths: "{{ backup_base_dir }}"
+        age: "{{ backup_retention_days }}d"
+        file_type: directory
+      register: old_backups
+
+    - name: Remove old local backups
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_backups.files }}"
+      when: old_backups.files is defined
+
+    - name: Display backup summary
+      debug:
+        msg:
+          - "✅ Backup completed successfully!"
+          - "📁 Backup location: {{ backup_base_dir }}/{{ backup_timestamp }}"
+          - "☁️  S3 upload: {{ 'SUCCESS' if (s3_upload_result.rc | default(1)) == 0 else 'FAILED or not configured' }}"
+          - "🗄️  Database backup: {{ 'INCLUDED' if server_role == 'primary' else 'SKIPPED (not primary server)' }}"
+          - "📊 Backup size: {{ ansible_local.backup_size | default('Calculating...') }}"

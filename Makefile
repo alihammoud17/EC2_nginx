@@ -1,56 +1,103 @@
-# Makefile
-.PHONY: help init plan apply destroy ssh status clean
+# FILE: Makefile - Project automation
+.PHONY: help init plan apply destroy verify clean ssh logs backup restore
 
-# Default target
+# Default environment
+ENV ?= dev
+
+# Colors for output
+GREEN := \033[0;32m
+YELLOW := \033[1;33m
+RED := \033[0;31m
+NC := \033[0m
+
+# Help target
 help: ## Show this help message
-	@echo 'Usage: make [target]'
+	@echo 'Infrastructure Management Commands'
+	@echo '=================================='
+	@echo ''
+	@echo 'Usage: make [target] [ENV=environment]'
 	@echo ''
 	@echo 'Targets:'
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  ${GREEN}%-15s${NC} %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo ''
+	@echo 'Environment Variables:'
+	@echo '  ENV              Target environment (dev, staging, prod) [default: dev]'
+	@echo '  SKIP_TERRAFORM   Skip Terraform execution (true/false) [default: false]'
+	@echo '  SKIP_ANSIBLE     Skip Ansible execution (true/false) [default: false]'
+	@echo '  DRY_RUN          Show what would be done (true/false) [default: false]'
+	@echo '  DEBUG            Enable debug output (true/false) [default: false]'
 
-init: ## Initialize Terraform
-	terraform init
+init: ## Initialize Terraform and Ansible
+	@echo "${GREEN}Initializing project for $(ENV) environment...${NC}"
+	@cd terraform && terraform init -upgrade
+	@cd ansible && ansible-galaxy install -r requirements.yml || true
+	@echo "${GREEN}✅ Initialization complete${NC}"
 
-plan: ## Plan Terraform deployment
-	terraform plan
+validate: ## Validate Terraform and Ansible configurations
+	@echo "${GREEN}Validating configurations...${NC}"
+	@cd terraform && terraform fmt -check=true && terraform validate
+	@cd ansible && ansible-playbook --syntax-check site.yml
+	@echo "${GREEN}✅ Validation complete${NC}"
 
-apply: ## Apply Terraform configuration
-	terraform apply
+plan: ## Plan infrastructure changes
+	@echo "${GREEN}Planning infrastructure changes for $(ENV)...${NC}"
+	@./deployment-scripts/deploy.sh $(ENV) plan
 
-deploy: ## Full deployment (init + apply)
-	terraform init
-	terraform apply -auto-approve
+apply: ## Deploy infrastructure and configure servers
+	@echo "${GREEN}Deploying infrastructure for $(ENV)...${NC}"
+	@./deployment-scripts/deploy.sh $(ENV) apply
 
-destroy: ## Destroy all resources
-	terraform destroy
+destroy: ## Destroy infrastructure
+	@echo "${RED}⚠️  WARNING: This will destroy all infrastructure for $(ENV)!${NC}"
+	@./deployment-scripts/deploy.sh $(ENV) destroy
 
-ssh: ## SSH into the EC2 instance
-	ssh -i ~/.ssh/id_rsa ec2-user@$$(terraform output -raw instance_public_ip)
+verify: ## Verify deployment
+	@echo "${GREEN}Verifying deployment for $(ENV)...${NC}"
+	@cd ansible && ansible-playbook -i inventory/dynamic_hosts.yml playbooks/verify.yml
 
-status: ## Show deployment status
-	@echo "=== Terraform Outputs ==="
-	terraform output
-	@echo ""
-	@echo "=== Instance Status ==="
-	aws ec2 describe-instances --instance-ids $$(terraform output -raw instance_id) --query 'Reservations[0].Instances[0].State.Name' --output text
+clean: ## Clean temporary files and old backups
+	@echo "${GREEN}Cleaning temporary files...${NC}"
+	@find terraform -name "tfplan-*" -type f -mtime +7 -delete || true
+	@find terraform -name "*.tfstate.backup" -type f -mtime +30 -delete || true
+	@find ansible -name "*.retry" -type f -delete || true
+	@find backups -name "*" -type f -mtime +90 -delete 2>/dev/null || true
+	@rm -f outputs.json.old terraform/*.log ansible/*.log
+	@echo "${GREEN}✅ Cleanup complete${NC}"
 
-test: ## Test Nginx service
-	@echo "Testing Nginx service..."
-	@curl -s -o /dev/null -w "%{http_code}" http://$$(terraform output -raw instance_public_ip) && echo " - Main page: OK" || echo " - Main page: FAILED"
-	@curl -s -o /dev/null -w "%{http_code}" http://$$(terraform output -raw instance_public_ip)/health && echo " - Health check: OK" || echo " - Health check: FAILED"
+ssh: ## SSH into the first web server
+	@echo "${GREEN}Connecting to first web server...${NC}"
+	@cd terraform && terraform output -raw instance_public_ips | jq -r '.[0]' | xargs -I {} ssh -i ~/.ssh/id_rsa ubuntu@{}
 
-logs: ## View Terraform logs
-	terraform show
+ssh-all: ## Show SSH commands for all servers
+	@echo "${GREEN}SSH commands for all servers:${NC}"
+	@cd terraform && terraform output ssh_commands | jq -r '.[]?'
 
-clean: ## Clean up local files
-	rm -f inventory
-	rm -rf .terraform/
-	rm -f terraform.tfstate*
-	rm -f *.tfplan
+logs: ## Show application logs from all servers
+	@echo "${GREEN}Showing application logs...${NC}"
+	@cd ansible && ansible webservers -i inventory/dynamic_hosts.yml -m shell -a "tail -50 /var/log/myapp/*.log"
 
-validate: ## Validate Terraform configuration
-	terraform validate
-	terraform fmt -check
+health: ## Check health of all services
+	@echo "${GREEN}Checking service health...${NC}"
+	@cd ansible && ansible webservers -i inventory/dynamic_hosts.yml -m uri -a "url=http://localhost/health"
 
-format: ## Format Terraform files
-	terraform fmt
+backup: ## Create backup of current state
+	@echo "${GREEN}Creating backup...${NC}"
+	@cd ansible && ansible-playbook -i inventory/dynamic_hosts.yml playbooks/backup.yml
+
+security-scan: ## Run security scanning
+	@echo "${GREEN}Running security scan...${NC}"
+	@cd ansible && ansible-playbook -i inventory/dynamic_hosts.yml playbooks/security.yml
+
+ssl-setup: ## Setup SSL certificates
+	@echo "${GREEN}Setting up SSL certificates...${NC}"
+	@cd ansible && ansible-playbook -i inventory/dynamic_hosts.yml playbooks/ssl.yml
+
+# Environment-specific targets
+dev-apply: ENV=dev
+dev-apply: apply ## Deploy to development environment
+
+staging-apply: ENV=staging  
+staging-apply: apply ## Deploy to staging environment
+
+prod-apply: ENV=prod
+prod-apply: apply ## Deploy to production environment

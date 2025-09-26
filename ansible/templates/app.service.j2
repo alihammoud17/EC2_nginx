@@ -1,0 +1,54 @@
+# FILE: ansible/templates/app.service.j2
+[Unit]
+Description={{ app_name }} Node.js application server
+Documentation=https://github.com/yourorg/{{ app_name }}
+After=network.target postgresql.service redis.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User={{ app_user }}
+Group={{ app_user }}
+WorkingDirectory={{ app_directory }}
+
+# Environment configuration
+Environment=NODE_ENV={{ node_env | default('production') }}
+EnvironmentFile={{ app_directory }}/.env
+
+# Process management
+ExecStart=/usr/bin/node {{ app_directory }}/app.js
+ExecReload=/bin/kill -USR2 $MAINPID
+ExecStop=/bin/kill -TERM $MAINPID
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+TimeoutSec=30
+RestartSec=5
+Restart=on-failure
+RestartPreventExitStatus=23
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ app_directory }}
+ReadWritePaths={{ log_directory }}
+ReadWritePaths=/tmp
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryLimit={{ ansible_memtotal_mb * 1024 * 1024 * 0.8 | int }}
+
+# Process monitoring
+PIDFile={{ app_directory }}/{{ app_name }}.pid
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={{ app_name }}
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=nginx.service
